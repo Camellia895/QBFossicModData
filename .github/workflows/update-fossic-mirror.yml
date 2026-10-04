@@ -1,0 +1,69 @@
+# fossic 数据镜像快照
+#
+# 把本文件放入你的数据仓库（如 QBForumModData 的 .github/workflows/update-fossic-mirror.yml），
+# GitHub Actions 会每天自动从 api.fossic.org 拉取一次并提交 fossic-data-snapshot.json 到仓库根目录。
+# 客户端在 app-config.json 的 FossicDataRepo.MirrorUrl 填入快照地址即可镜像优先、API 兜底：
+#   raw 直链（海外）: https://raw.githubusercontent.com/<owner>/<repo>/refs/heads/main/fossic-data-snapshot.json
+#   jsDelivr（大陆可用）: https://cdn.jsdelivr.net/gh/<owner>/<repo>@main/fossic-data-snapshot.json
+#
+# 快照格式（FossicSnapshot）：三个 API 端点的一次性合成，客户端转换代码与直连 API 完全一致。
+
+name: Update fossic data mirror
+
+on:
+  schedule:
+    - cron: "17 21 * * *" # 每天 UTC 21:17（北京时间凌晨 5:17，避开论坛高峰）
+  workflow_dispatch: {} # 允许手动触发
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-fossic-mirror
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch fossic API snapshot
+        shell: python {0}
+        run: |
+          import json, time, urllib.request
+
+          UA = "QBMBAMM-mirror-publisher/1.0 (Starsector mod manager data mirror)"
+
+          def get_json(path):
+              req = urllib.request.Request("https://api.fossic.org" + path, headers={"User-Agent": UA})
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  return json.load(r)
+
+          mods = get_json("/mods?include_modding=true")
+          categories = get_json("/meta/mod_categories")
+          languages = get_json("/meta/mod_languages")
+
+          snapshot = {
+              "format": "qbmm-fossic-snapshot/1",
+              "fetched_at": int(time.time()),
+              "mods": mods,
+              "meta": {"mod_categories": categories, "mod_languages": languages},
+          }
+          with open("fossic-data-snapshot.json", "w", encoding="utf-8") as f:
+              json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"))
+          print("mods:", len(mods))
+
+      - name: Commit if changed
+        shell: bash
+        run: |
+          git config user.name "fossic-mirror-bot"
+          git config user.email "actions@github.com"
+          git add fossic-data-snapshot.json
+          if git diff --cached --quiet; then
+            echo "Snapshot unchanged, skipping commit"
+          else
+            git commit -m "Update fossic data snapshot ($(date -u +%FT%TZ))"
+            git push
+          fi
